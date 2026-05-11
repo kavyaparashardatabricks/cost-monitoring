@@ -1,0 +1,1629 @@
+{
+  "datasets": [
+    {
+      "name": "per_user",
+      "displayName": "Per-User Cost",
+      "queryLines": [
+        "WITH lp AS (\n",
+        "    SELECT sku_name, cloud, pricing.default AS unit_price   \n",
+        "    FROM system.billing.list_prices   \n",
+        "    WHERE current_timestamp() BETWEEN price_start_time AND COALESCE(price_end_time, current_timestamp())\n",
+        "    ) \n",
+        "SELECT COALESCE(u.identity_metadata.run_as, '(unattributed)') AS user_email,   u.workspace_id,   u.usage_date,   u.billing_origin_product AS product,   CAST(u.usage_quantity * COALESCE(lp.unit_price, 0) AS DOUBLE) AS cost_usd,   CAST(u.usage_quantity AS DOUBLE) AS dbus FROM system.billing.usage u LEFT JOIN lp ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud WHERE u.usage_date >= current_date() - 30 "
+      ]
+    },
+    {
+      "name": "per_query",
+      "displayName": "Per-Query Approximate Cost",
+      "queryLines": [
+        "WITH lp AS (   SELECT sku_name, cloud, pricing.default AS unit_price   FROM system.billing.list_prices   WHERE current_timestamp() BETWEEN price_start_time AND COALESCE(price_end_time, current_timestamp()) ), warehouse_cost AS (   SELECT     u.workspace_id,     u.usage_metadata.warehouse_id AS warehouse_id,     u.usage_date,     SUM(u.usage_quantity * COALESCE(lp.unit_price,0)) AS day_cost_usd   FROM system.billing.usage u   LEFT JOIN lp ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud   WHERE u.usage_metadata.warehouse_id IS NOT NULL     AND u.usage_date >= current_date() - 30   GROUP BY 1,2,3 ), query_runtime AS (   SELECT     workspace_id,     compute.warehouse_id AS warehouse_id,     DATE(start_time) AS usage_date,     statement_id,     executed_by,     statement_type,     SUBSTRING(statement_text, 1, 200) AS statement_preview,     total_duration_ms,     SUM(total_duration_ms) OVER (PARTITION BY workspace_id, compute.warehouse_id, DATE(start_time)) AS day_total_ms   FROM system.query.history   WHERE compute.warehouse_id IS NOT NULL     AND start_time >= current_date() - 30 ) SELECT   qr.statement_id,   qr.executed_by AS user_email,   qr.usage_date,   qr.workspace_id,   qr.warehouse_id,   qr.statement_type,   qr.statement_preview,   CAST(qr.total_duration_ms AS DOUBLE) AS total_duration_ms,   CAST((qr.total_duration_ms * 1.0 / NULLIF(qr.day_total_ms,0)) * wc.day_cost_usd AS DOUBLE) AS approx_cost_usd FROM query_runtime qr JOIN warehouse_cost wc USING (workspace_id, warehouse_id, usage_date) "
+      ]
+    },
+    {
+      "name": "per_table",
+      "displayName": "Per-Table / View / MV Cost",
+      "queryLines": [
+        "WITH lp AS (   SELECT sku_name, cloud, pricing.default AS unit_price   FROM system.billing.list_prices   WHERE current_timestamp() BETWEEN price_start_time AND COALESCE(price_end_time, current_timestamp()) ) SELECT   u.workspace_id,   u.usage_metadata.uc_table_catalog AS catalog,   u.usage_metadata.uc_table_schema  AS schema_name,   u.usage_metadata.uc_table_name    AS table_fqn,   u.billing_origin_product          AS product,   u.usage_date,   CAST(u.usage_quantity * COALESCE(lp.unit_price, 0) AS DOUBLE) AS cost_usd,   CAST(u.usage_quantity AS DOUBLE) AS dbus FROM system.billing.usage u LEFT JOIN lp ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud WHERE u.usage_date >= current_date() - 30   AND u.usage_metadata.uc_table_name IS NOT NULL "
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "page_per_user",
+      "displayName": "\ud83d\udc64 Per-User",
+      "layout": [
+        {
+          "widget": {
+            "name": "p1_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## \ud83d\udc64 Per-User Cost Attribution"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "p1_subtitle",
+            "multilineTextboxSpec": {
+              "lines": [
+                "DBU cost attributed to the user who ran the workload (`identity_metadata.run_as`). Last 30 days."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "p1_ws_filter",
+            "queries": [
+              {
+                "name": "per_user_workspace_id_filter",
+                "query": {
+                  "datasetName": "per_user",
+                  "fields": [
+                    {
+                      "name": "workspace_id",
+                      "expression": "`workspace_id`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "workspace_id",
+                    "displayName": "Workspace",
+                    "queryName": "per_user_workspace_id_filter"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Workspace"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "p1_product_filter",
+            "queries": [
+              {
+                "name": "per_user_product_filter",
+                "query": {
+                  "datasetName": "per_user",
+                  "fields": [
+                    {
+                      "name": "product",
+                      "expression": "`product`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "product",
+                    "displayName": "Product",
+                    "queryName": "per_user_product_filter"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Product"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "p1_date_filter",
+            "queries": [
+              {
+                "name": "per_user_date_p1",
+                "query": {
+                  "datasetName": "per_user",
+                  "fields": [
+                    {
+                      "name": "usage_date",
+                      "expression": "`usage_date`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "usage_date",
+                    "displayName": "Date Range",
+                    "queryName": "per_user_date_p1"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Date Range"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "p1_total_cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_user",
+                  "fields": [
+                    {
+                      "name": "sum(cost_usd)",
+                      "expression": "SUM(`cost_usd`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(cost_usd)",
+                  "displayName": "Total Cost (USD)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Total Cost (USD)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "p1_total_dbus",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_user",
+                  "fields": [
+                    {
+                      "name": "sum(dbus)",
+                      "expression": "SUM(`dbus`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(dbus)",
+                  "displayName": "Total DBUs"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Total DBUs"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 4,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "p1_users",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_user",
+                  "fields": [
+                    {
+                      "name": "countdistinct(user_email)",
+                      "expression": "COUNT(DISTINCT `user_email`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "countdistinct(user_email)",
+                  "displayName": "Distinct Users"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Distinct Users"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 4,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "p1_top_users",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_user",
+                  "fields": [
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    },
+                    {
+                      "name": "sum(cost_usd)",
+                      "expression": "SUM(`cost_usd`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "user_email",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "user_email"
+                },
+                "y": {
+                  "fieldName": "sum(cost_usd)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "sum(cost_usd)"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Top Users by Cost"
+              },
+              "mark": {
+                "colors": [
+                  "#FF3621",
+                  "#FFAB00",
+                  "#00A972",
+                  "#8BCAE7",
+                  "#AB4057",
+                  "#99DDB4",
+                  "#FCA4A1",
+                  "#919191"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "p1_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_user",
+                  "fields": [
+                    {
+                      "name": "daily_date",
+                      "expression": "DATE_TRUNC(\"DAY\", `usage_date`)"
+                    },
+                    {
+                      "name": "sum(cost_usd)",
+                      "expression": "SUM(`cost_usd`)"
+                    },
+                    {
+                      "name": "product",
+                      "expression": "`product`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "daily_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Date"
+                },
+                "y": {
+                  "fieldName": "sum(cost_usd)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Cost (USD)"
+                },
+                "color": {
+                  "fieldName": "product",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "product"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Daily Cost by Product"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 7,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "p1_user_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_user",
+                  "fields": [
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    },
+                    {
+                      "name": "product",
+                      "expression": "`product`"
+                    },
+                    {
+                      "name": "workspace_id",
+                      "expression": "`workspace_id`"
+                    },
+                    {
+                      "name": "sum(cost_usd)",
+                      "expression": "SUM(`cost_usd`)"
+                    },
+                    {
+                      "name": "sum(dbus)",
+                      "expression": "SUM(`dbus`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "user_email",
+                    "displayName": "User"
+                  },
+                  {
+                    "fieldName": "product",
+                    "displayName": "Product"
+                  },
+                  {
+                    "fieldName": "workspace_id",
+                    "displayName": "Workspace"
+                  },
+                  {
+                    "fieldName": "sum(cost_usd)",
+                    "displayName": "Cost (USD)"
+                  },
+                  {
+                    "fieldName": "sum(dbus)",
+                    "displayName": "DBUs"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "User \u00d7 Product Breakdown"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 6,
+            "height": 7
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "page_per_query",
+      "displayName": "\ud83d\udd0d Per-Query",
+      "layout": [
+        {
+          "widget": {
+            "name": "p2_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## \ud83d\udd0d Per-Query Approximate Cost"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "p2_subtitle",
+            "multilineTextboxSpec": {
+              "lines": [
+                "Warehouse cost allocated to each query by its share of total query duration on that warehouse-day. Approximate (DBSQL is billed by warehouse uptime, not per-query) \u2014 use until the **DBSQL Cost Per Query** preview is GA."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "p2_ws_filter",
+            "queries": [
+              {
+                "name": "per_query_workspace_id_filter",
+                "query": {
+                  "datasetName": "per_query",
+                  "fields": [
+                    {
+                      "name": "workspace_id",
+                      "expression": "`workspace_id`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "workspace_id",
+                    "displayName": "Workspace",
+                    "queryName": "per_query_workspace_id_filter"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Workspace"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "p2_user_filter",
+            "queries": [
+              {
+                "name": "per_query_user_email_filter",
+                "query": {
+                  "datasetName": "per_query",
+                  "fields": [
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "user_email",
+                    "displayName": "User",
+                    "queryName": "per_query_user_email_filter"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "User"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 3,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "p2_date_filter",
+            "queries": [
+              {
+                "name": "per_query_date_p2",
+                "query": {
+                  "datasetName": "per_query",
+                  "fields": [
+                    {
+                      "name": "usage_date",
+                      "expression": "`usage_date`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "usage_date",
+                    "displayName": "Date Range",
+                    "queryName": "per_query_date_p2"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Date Range"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 3,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "p2_total_cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_query",
+                  "fields": [
+                    {
+                      "name": "sum(approx_cost_usd)",
+                      "expression": "SUM(`approx_cost_usd`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(approx_cost_usd)",
+                  "displayName": "Total Approx. Cost (USD)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Total Approx. Cost (USD)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "p2_query_count",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_query",
+                  "fields": [
+                    {
+                      "name": "count(statement_id)",
+                      "expression": "COUNT(`statement_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(statement_id)",
+                  "displayName": "Queries"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Queries"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 5,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "p2_distinct_users",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_query",
+                  "fields": [
+                    {
+                      "name": "countdistinct(user_email)",
+                      "expression": "COUNT(DISTINCT `user_email`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "countdistinct(user_email)",
+                  "displayName": "Distinct Users"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Distinct Users"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 5,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "p2_top_users_cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_query",
+                  "fields": [
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    },
+                    {
+                      "name": "sum(approx_cost_usd)",
+                      "expression": "SUM(`approx_cost_usd`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "user_email",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "user_email"
+                },
+                "y": {
+                  "fieldName": "sum(approx_cost_usd)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "sum(approx_cost_usd)"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Top Users by Approx. Query Cost"
+              },
+              "mark": {
+                "colors": [
+                  "#FF3621",
+                  "#FFAB00",
+                  "#00A972",
+                  "#8BCAE7",
+                  "#AB4057",
+                  "#99DDB4",
+                  "#FCA4A1",
+                  "#919191"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "p2_by_type",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_query",
+                  "fields": [
+                    {
+                      "name": "statement_type",
+                      "expression": "`statement_type`"
+                    },
+                    {
+                      "name": "sum(approx_cost_usd)",
+                      "expression": "SUM(`approx_cost_usd`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "statement_type",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "statement_type"
+                },
+                "y": {
+                  "fieldName": "sum(approx_cost_usd)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "sum(approx_cost_usd)"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Cost by Statement Type"
+              },
+              "mark": {
+                "colors": [
+                  "#FF3621",
+                  "#FFAB00",
+                  "#00A972",
+                  "#8BCAE7",
+                  "#AB4057",
+                  "#99DDB4",
+                  "#FCA4A1",
+                  "#919191"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 8,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "p2_query_table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_query",
+                  "fields": [
+                    {
+                      "name": "statement_id",
+                      "expression": "`statement_id`"
+                    },
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    },
+                    {
+                      "name": "statement_type",
+                      "expression": "`statement_type`"
+                    },
+                    {
+                      "name": "statement_preview",
+                      "expression": "`statement_preview`"
+                    },
+                    {
+                      "name": "total_duration_ms",
+                      "expression": "`total_duration_ms`"
+                    },
+                    {
+                      "name": "approx_cost_usd",
+                      "expression": "`approx_cost_usd`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "statement_id",
+                    "displayName": "Statement ID"
+                  },
+                  {
+                    "fieldName": "user_email",
+                    "displayName": "User"
+                  },
+                  {
+                    "fieldName": "statement_type",
+                    "displayName": "Type"
+                  },
+                  {
+                    "fieldName": "statement_preview",
+                    "displayName": "SQL (preview)"
+                  },
+                  {
+                    "fieldName": "total_duration_ms",
+                    "displayName": "Duration (ms)"
+                  },
+                  {
+                    "fieldName": "approx_cost_usd",
+                    "displayName": "Approx. Cost (USD)"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Top Queries (raw)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 6,
+            "height": 8
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "page_per_table",
+      "displayName": "\ud83d\udce6 Per-Table / MV",
+      "layout": [
+        {
+          "widget": {
+            "name": "p3_title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## \ud83d\udce6 Per-Table / View / Materialized-View Cost"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "p3_subtitle",
+            "multilineTextboxSpec": {
+              "lines": [
+                "DBU cost attributed to a Unity Catalog table, view, or materialized view via `usage_metadata.uc_table_*`. Covers SQL, DLT/streaming, and other UC-aware workloads."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "p3_ws_filter",
+            "queries": [
+              {
+                "name": "per_table_workspace_id_filter",
+                "query": {
+                  "datasetName": "per_table",
+                  "fields": [
+                    {
+                      "name": "workspace_id",
+                      "expression": "`workspace_id`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "workspace_id",
+                    "displayName": "Workspace",
+                    "queryName": "per_table_workspace_id_filter"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Workspace"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "p3_catalog_filter",
+            "queries": [
+              {
+                "name": "per_table_catalog_filter",
+                "query": {
+                  "datasetName": "per_table",
+                  "fields": [
+                    {
+                      "name": "catalog",
+                      "expression": "`catalog`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "catalog",
+                    "displayName": "Catalog",
+                    "queryName": "per_table_catalog_filter"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Catalog"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 3,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "p3_date_filter",
+            "queries": [
+              {
+                "name": "per_table_date_p3",
+                "query": {
+                  "datasetName": "per_table",
+                  "fields": [
+                    {
+                      "name": "usage_date",
+                      "expression": "`usage_date`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "usage_date",
+                    "displayName": "Date Range",
+                    "queryName": "per_table_date_p3"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Date Range"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 3,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "p3_total_cost",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_table",
+                  "fields": [
+                    {
+                      "name": "sum(cost_usd)",
+                      "expression": "SUM(`cost_usd`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(cost_usd)",
+                  "displayName": "Total Cost (USD)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Total Cost (USD)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "p3_total_dbus",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_table",
+                  "fields": [
+                    {
+                      "name": "sum(dbus)",
+                      "expression": "SUM(`dbus`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(dbus)",
+                  "displayName": "Total DBUs"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Total DBUs"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 5,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "p3_tables",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_table",
+                  "fields": [
+                    {
+                      "name": "countdistinct(table_fqn)",
+                      "expression": "COUNT(DISTINCT `table_fqn`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "countdistinct(table_fqn)",
+                  "displayName": "Distinct Tables"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Distinct Tables"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 5,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "p3_top_tables",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_table",
+                  "fields": [
+                    {
+                      "name": "table_fqn",
+                      "expression": "`table_fqn`"
+                    },
+                    {
+                      "name": "sum(cost_usd)",
+                      "expression": "SUM(`cost_usd`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "table_fqn",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "table_fqn"
+                },
+                "y": {
+                  "fieldName": "sum(cost_usd)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "sum(cost_usd)"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Top Tables by Cost"
+              },
+              "mark": {
+                "colors": [
+                  "#FF3621",
+                  "#FFAB00",
+                  "#00A972",
+                  "#8BCAE7",
+                  "#AB4057",
+                  "#99DDB4",
+                  "#FCA4A1",
+                  "#919191"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "p3_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_table",
+                  "fields": [
+                    {
+                      "name": "daily_date",
+                      "expression": "DATE_TRUNC(\"DAY\", `usage_date`)"
+                    },
+                    {
+                      "name": "sum(cost_usd)",
+                      "expression": "SUM(`cost_usd`)"
+                    },
+                    {
+                      "name": "product",
+                      "expression": "`product`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "daily_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Date"
+                },
+                "y": {
+                  "fieldName": "sum(cost_usd)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Cost (USD)"
+                },
+                "color": {
+                  "fieldName": "product",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "product"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Daily Cost by Product"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "p3_by_catalog",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_table",
+                  "fields": [
+                    {
+                      "name": "catalog",
+                      "expression": "`catalog`"
+                    },
+                    {
+                      "name": "sum(cost_usd)",
+                      "expression": "SUM(`cost_usd`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "catalog",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "catalog"
+                },
+                "y": {
+                  "fieldName": "sum(cost_usd)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "sum(cost_usd)"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Cost by Catalog"
+              },
+              "mark": {
+                "colors": [
+                  "#FF3621",
+                  "#FFAB00",
+                  "#00A972",
+                  "#8BCAE7",
+                  "#AB4057",
+                  "#99DDB4",
+                  "#FCA4A1",
+                  "#919191"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 14,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "p3_table_breakdown",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "per_table",
+                  "fields": [
+                    {
+                      "name": "table_fqn",
+                      "expression": "`table_fqn`"
+                    },
+                    {
+                      "name": "catalog",
+                      "expression": "`catalog`"
+                    },
+                    {
+                      "name": "schema_name",
+                      "expression": "`schema_name`"
+                    },
+                    {
+                      "name": "product",
+                      "expression": "`product`"
+                    },
+                    {
+                      "name": "sum(cost_usd)",
+                      "expression": "SUM(`cost_usd`)"
+                    },
+                    {
+                      "name": "sum(dbus)",
+                      "expression": "SUM(`dbus`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "table_fqn",
+                    "displayName": "Table"
+                  },
+                  {
+                    "fieldName": "catalog",
+                    "displayName": "Catalog"
+                  },
+                  {
+                    "fieldName": "schema_name",
+                    "displayName": "Schema"
+                  },
+                  {
+                    "fieldName": "product",
+                    "displayName": "Product"
+                  },
+                  {
+                    "fieldName": "sum(cost_usd)",
+                    "displayName": "Cost (USD)"
+                  },
+                  {
+                    "fieldName": "sum(dbus)",
+                    "displayName": "DBUs"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Table \u00d7 Product Breakdown"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 20,
+            "width": 6,
+            "height": 8
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    }
+  }
+}

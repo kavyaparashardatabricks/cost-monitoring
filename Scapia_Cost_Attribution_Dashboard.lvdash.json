@@ -4,26 +4,161 @@
       "name": "per_user",
       "displayName": "Per-User Cost",
       "queryLines": [
-        "WITH lp AS (\n",
-        "    SELECT sku_name, cloud, pricing.default AS unit_price   \n",
-        "    FROM system.billing.list_prices   \n",
-        "    WHERE current_timestamp() BETWEEN price_start_time AND COALESCE(price_end_time, current_timestamp())\n",
-        "    ) \n",
-        "SELECT COALESCE(u.identity_metadata.run_as, '(unattributed)') AS user_email,   u.workspace_id,   u.usage_date,   u.billing_origin_product AS product,   CAST(u.usage_quantity * COALESCE(lp.unit_price, 0) AS DOUBLE) AS cost_usd,   CAST(u.usage_quantity AS DOUBLE) AS dbus FROM system.billing.usage u LEFT JOIN lp ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud WHERE u.usage_date >= current_date() - 30 "
+        "WITH lp AS ( ",
+        "  SELECT sku_name, cloud, pricing.default AS unit_price ",
+        "  FROM system.billing.list_prices ",
+        "  WHERE current_timestamp() BETWEEN price_start_time AND COALESCE(price_end_time, current_timestamp()) ",
+        "), ",
+        "wh AS ( ",
+        "  SELECT warehouse_id, FIRST(warehouse_name IGNORE NULLS) AS warehouse_name ",
+        "  FROM system.compute.warehouses GROUP BY warehouse_id ",
+        "), ",
+        "cl AS ( ",
+        "  SELECT cluster_id, FIRST(cluster_name IGNORE NULLS) AS cluster_name ",
+        "  FROM system.compute.clusters GROUP BY cluster_id ",
+        "), ",
+        "jn AS ( ",
+        "  SELECT job_id, FIRST(name IGNORE NULLS) AS job_name ",
+        "  FROM system.lakeflow.jobs GROUP BY job_id ",
+        ") ",
+        "SELECT ",
+        "  COALESCE(u.identity_metadata.run_as, '(unattributed)') AS user_email, ",
+        "  u.workspace_id, ",
+        "  u.usage_date, ",
+        "  u.billing_origin_product AS product, ",
+        "  CASE ",
+        "    WHEN u.usage_metadata.warehouse_id IS NOT NULL ",
+        "      THEN CONCAT('[Warehouse] ', COALESCE(wh.warehouse_name, u.usage_metadata.warehouse_id)) ",
+        "    WHEN u.usage_metadata.job_id IS NOT NULL ",
+        "      THEN CONCAT('[Job] ',       COALESCE(jn.job_name,      u.usage_metadata.job_id)) ",
+        "    WHEN u.usage_metadata.cluster_id IS NOT NULL ",
+        "      THEN CONCAT('[Cluster] ',   COALESCE(cl.cluster_name,  u.usage_metadata.cluster_id)) ",
+        "    WHEN u.usage_metadata.dlt_pipeline_id IS NOT NULL ",
+        "      THEN CONCAT('[Pipeline] ',  u.usage_metadata.dlt_pipeline_id) ",
+        "    WHEN u.usage_metadata.endpoint_id IS NOT NULL OR u.usage_metadata.endpoint_name IS NOT NULL ",
+        "      THEN CONCAT('[Endpoint] ',  COALESCE(u.usage_metadata.endpoint_name, u.usage_metadata.endpoint_id)) ",
+        "    WHEN u.usage_metadata.app_id IS NOT NULL OR u.usage_metadata.app_name IS NOT NULL ",
+        "      THEN CONCAT('[App] ',       COALESCE(u.usage_metadata.app_name, u.usage_metadata.app_id)) ",
+        "    ELSE '[Other] (none)' ",
+        "  END AS compute_instance, ",
+        "  CAST(u.usage_quantity * COALESCE(lp.unit_price, 0) AS DOUBLE) AS cost_usd, ",
+        "  CAST(u.usage_quantity AS DOUBLE)                              AS dbus ",
+        "FROM system.billing.usage u ",
+        "LEFT JOIN lp ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud ",
+        "LEFT JOIN wh ON wh.warehouse_id = u.usage_metadata.warehouse_id ",
+        "LEFT JOIN cl ON cl.cluster_id   = u.usage_metadata.cluster_id ",
+        "LEFT JOIN jn ON jn.job_id       = u.usage_metadata.job_id ",
+        "WHERE u.usage_date >= current_date() - 30 "
       ]
     },
     {
       "name": "per_query",
       "displayName": "Per-Query Approximate Cost",
       "queryLines": [
-        "WITH lp AS (   SELECT sku_name, cloud, pricing.default AS unit_price   FROM system.billing.list_prices   WHERE current_timestamp() BETWEEN price_start_time AND COALESCE(price_end_time, current_timestamp()) ), warehouse_cost AS (   SELECT     u.workspace_id,     u.usage_metadata.warehouse_id AS warehouse_id,     u.usage_date,     SUM(u.usage_quantity * COALESCE(lp.unit_price,0)) AS day_cost_usd   FROM system.billing.usage u   LEFT JOIN lp ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud   WHERE u.usage_metadata.warehouse_id IS NOT NULL     AND u.usage_date >= current_date() - 30   GROUP BY 1,2,3 ), query_runtime AS (   SELECT     workspace_id,     compute.warehouse_id AS warehouse_id,     DATE(start_time) AS usage_date,     statement_id,     executed_by,     statement_type,     SUBSTRING(statement_text, 1, 200) AS statement_preview,     total_duration_ms,     SUM(total_duration_ms) OVER (PARTITION BY workspace_id, compute.warehouse_id, DATE(start_time)) AS day_total_ms   FROM system.query.history   WHERE compute.warehouse_id IS NOT NULL     AND start_time >= current_date() - 30 ) SELECT   qr.statement_id,   qr.executed_by AS user_email,   qr.usage_date,   qr.workspace_id,   qr.warehouse_id,   qr.statement_type,   qr.statement_preview,   CAST(qr.total_duration_ms AS DOUBLE) AS total_duration_ms,   CAST((qr.total_duration_ms * 1.0 / NULLIF(qr.day_total_ms,0)) * wc.day_cost_usd AS DOUBLE) AS approx_cost_usd FROM query_runtime qr JOIN warehouse_cost wc USING (workspace_id, warehouse_id, usage_date) "
+        "WITH lp AS ( ",
+        "  SELECT sku_name, cloud, pricing.default AS unit_price ",
+        "  FROM system.billing.list_prices ",
+        "  WHERE current_timestamp() BETWEEN price_start_time AND COALESCE(price_end_time, current_timestamp()) ",
+        "), ",
+        "wh AS ( ",
+        "  SELECT warehouse_id, FIRST(warehouse_name IGNORE NULLS) AS warehouse_name ",
+        "  FROM system.compute.warehouses GROUP BY warehouse_id ",
+        "), ",
+        "warehouse_cost AS ( ",
+        "  SELECT ",
+        "    u.workspace_id, ",
+        "    u.usage_metadata.warehouse_id AS warehouse_id, ",
+        "    u.usage_date, ",
+        "    SUM(u.usage_quantity * COALESCE(lp.unit_price,0)) AS day_cost_usd ",
+        "  FROM system.billing.usage u ",
+        "  LEFT JOIN lp ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud ",
+        "  WHERE u.usage_metadata.warehouse_id IS NOT NULL ",
+        "    AND u.usage_date >= current_date() - 30 ",
+        "  GROUP BY 1,2,3 ",
+        "), ",
+        "query_runtime AS ( ",
+        "  SELECT ",
+        "    workspace_id, ",
+        "    compute.warehouse_id AS warehouse_id, ",
+        "    DATE(start_time) AS usage_date, ",
+        "    statement_id, ",
+        "    executed_by, ",
+        "    statement_type, ",
+        "    SUBSTRING(statement_text, 1, 200) AS statement_preview, ",
+        "    total_duration_ms, ",
+        "    SUM(total_duration_ms) OVER (PARTITION BY workspace_id, compute.warehouse_id, DATE(start_time)) AS day_total_ms ",
+        "  FROM system.query.history ",
+        "  WHERE compute.warehouse_id IS NOT NULL ",
+        "    AND start_time >= current_date() - 30 ",
+        ") ",
+        "SELECT ",
+        "  qr.statement_id, ",
+        "  qr.executed_by AS user_email, ",
+        "  qr.usage_date, ",
+        "  qr.workspace_id, ",
+        "  qr.warehouse_id, ",
+        "  CONCAT('[Warehouse] ', COALESCE(wh.warehouse_name, qr.warehouse_id)) AS compute_instance, ",
+        "  qr.statement_type, ",
+        "  qr.statement_preview, ",
+        "  CAST(qr.total_duration_ms AS DOUBLE) AS total_duration_ms, ",
+        "  CAST((qr.total_duration_ms * 1.0 / NULLIF(qr.day_total_ms,0)) * wc.day_cost_usd AS DOUBLE) AS approx_cost_usd ",
+        "FROM query_runtime qr ",
+        "JOIN warehouse_cost wc USING (workspace_id, warehouse_id, usage_date) ",
+        "LEFT JOIN wh ON wh.warehouse_id = qr.warehouse_id "
       ]
     },
     {
       "name": "per_table",
       "displayName": "Per-Table / View / MV Cost",
       "queryLines": [
-        "WITH lp AS (   SELECT sku_name, cloud, pricing.default AS unit_price   FROM system.billing.list_prices   WHERE current_timestamp() BETWEEN price_start_time AND COALESCE(price_end_time, current_timestamp()) ) SELECT   u.workspace_id,   u.usage_metadata.uc_table_catalog AS catalog,   u.usage_metadata.uc_table_schema  AS schema_name,   u.usage_metadata.uc_table_name    AS table_fqn,   u.billing_origin_product          AS product,   u.usage_date,   CAST(u.usage_quantity * COALESCE(lp.unit_price, 0) AS DOUBLE) AS cost_usd,   CAST(u.usage_quantity AS DOUBLE) AS dbus FROM system.billing.usage u LEFT JOIN lp ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud WHERE u.usage_date >= current_date() - 30   AND u.usage_metadata.uc_table_name IS NOT NULL "
+        "WITH lp AS ( ",
+        "  SELECT sku_name, cloud, pricing.default AS unit_price ",
+        "  FROM system.billing.list_prices ",
+        "  WHERE current_timestamp() BETWEEN price_start_time AND COALESCE(price_end_time, current_timestamp()) ",
+        "), ",
+        "wh AS ( ",
+        "  SELECT warehouse_id, FIRST(warehouse_name IGNORE NULLS) AS warehouse_name ",
+        "  FROM system.compute.warehouses GROUP BY warehouse_id ",
+        "), ",
+        "cl AS ( ",
+        "  SELECT cluster_id, FIRST(cluster_name IGNORE NULLS) AS cluster_name ",
+        "  FROM system.compute.clusters GROUP BY cluster_id ",
+        "), ",
+        "jn AS ( ",
+        "  SELECT job_id, FIRST(name IGNORE NULLS) AS job_name ",
+        "  FROM system.lakeflow.jobs GROUP BY job_id ",
+        ") ",
+        "SELECT ",
+        "  u.workspace_id, ",
+        "  u.usage_metadata.uc_table_catalog AS catalog, ",
+        "  u.usage_metadata.uc_table_schema  AS schema_name, ",
+        "  u.usage_metadata.uc_table_name    AS table_fqn, ",
+        "  u.billing_origin_product          AS product, ",
+        "  u.usage_date, ",
+        "  CASE ",
+        "    WHEN u.usage_metadata.warehouse_id IS NOT NULL ",
+        "      THEN CONCAT('[Warehouse] ', COALESCE(wh.warehouse_name, u.usage_metadata.warehouse_id)) ",
+        "    WHEN u.usage_metadata.job_id IS NOT NULL ",
+        "      THEN CONCAT('[Job] ',       COALESCE(jn.job_name,      u.usage_metadata.job_id)) ",
+        "    WHEN u.usage_metadata.cluster_id IS NOT NULL ",
+        "      THEN CONCAT('[Cluster] ',   COALESCE(cl.cluster_name,  u.usage_metadata.cluster_id)) ",
+        "    WHEN u.usage_metadata.dlt_pipeline_id IS NOT NULL ",
+        "      THEN CONCAT('[Pipeline] ',  u.usage_metadata.dlt_pipeline_id) ",
+        "    WHEN u.usage_metadata.endpoint_id IS NOT NULL OR u.usage_metadata.endpoint_name IS NOT NULL ",
+        "      THEN CONCAT('[Endpoint] ',  COALESCE(u.usage_metadata.endpoint_name, u.usage_metadata.endpoint_id)) ",
+        "    WHEN u.usage_metadata.app_id IS NOT NULL OR u.usage_metadata.app_name IS NOT NULL ",
+        "      THEN CONCAT('[App] ',       COALESCE(u.usage_metadata.app_name, u.usage_metadata.app_id)) ",
+        "    ELSE '[Other] (none)' ",
+        "  END AS compute_instance, ",
+        "  CAST(u.usage_quantity * COALESCE(lp.unit_price, 0) AS DOUBLE) AS cost_usd, ",
+        "  CAST(u.usage_quantity AS DOUBLE) AS dbus ",
+        "FROM system.billing.usage u ",
+        "LEFT JOIN lp ON u.sku_name = lp.sku_name AND u.cloud = lp.cloud ",
+        "LEFT JOIN wh ON wh.warehouse_id = u.usage_metadata.warehouse_id ",
+        "LEFT JOIN cl ON cl.cluster_id   = u.usage_metadata.cluster_id ",
+        "LEFT JOIN jn ON jn.job_id       = u.usage_metadata.job_id ",
+        "WHERE u.usage_date >= current_date() - 30 ",
+        "  AND u.usage_metadata.uc_table_name IS NOT NULL "
       ]
     }
   ],
@@ -228,7 +363,7 @@
           },
           "position": {
             "x": 0,
-            "y": 4,
+            "y": 6,
             "width": 2,
             "height": 3
           }
@@ -268,7 +403,7 @@
           },
           "position": {
             "x": 2,
-            "y": 4,
+            "y": 6,
             "width": 2,
             "height": 3
           }
@@ -308,7 +443,7 @@
           },
           "position": {
             "x": 4,
-            "y": 4,
+            "y": 6,
             "width": 2,
             "height": 3
           }
@@ -380,7 +515,7 @@
           },
           "position": {
             "x": 0,
-            "y": 7,
+            "y": 9,
             "width": 3,
             "height": 6
           }
@@ -445,7 +580,7 @@
           },
           "position": {
             "x": 3,
-            "y": 7,
+            "y": 9,
             "width": 3,
             "height": 6
           }
@@ -519,9 +654,52 @@
           },
           "position": {
             "x": 0,
-            "y": 13,
+            "y": 15,
             "width": 6,
             "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "p1_compute_filter",
+            "queries": [
+              {
+                "name": "per_user_compute_instance_filter_p1",
+                "query": {
+                  "datasetName": "per_user",
+                  "fields": [
+                    {
+                      "name": "compute_instance",
+                      "expression": "`compute_instance`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "compute_instance",
+                    "displayName": "Compute Instance",
+                    "queryName": "per_user_compute_instance_filter_p1"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Compute Instance"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 2,
+            "height": 2
           }
         }
       ],
@@ -727,7 +905,7 @@
           },
           "position": {
             "x": 0,
-            "y": 5,
+            "y": 7,
             "width": 2,
             "height": 3
           }
@@ -767,7 +945,7 @@
           },
           "position": {
             "x": 2,
-            "y": 5,
+            "y": 7,
             "width": 2,
             "height": 3
           }
@@ -807,7 +985,7 @@
           },
           "position": {
             "x": 4,
-            "y": 5,
+            "y": 7,
             "width": 2,
             "height": 3
           }
@@ -879,7 +1057,7 @@
           },
           "position": {
             "x": 0,
-            "y": 8,
+            "y": 10,
             "width": 3,
             "height": 6
           }
@@ -951,7 +1129,7 @@
           },
           "position": {
             "x": 3,
-            "y": 8,
+            "y": 10,
             "width": 3,
             "height": 6
           }
@@ -1033,9 +1211,52 @@
           },
           "position": {
             "x": 0,
-            "y": 14,
+            "y": 16,
             "width": 6,
             "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "p2_compute_filter",
+            "queries": [
+              {
+                "name": "per_query_compute_instance_filter_p2",
+                "query": {
+                  "datasetName": "per_query",
+                  "fields": [
+                    {
+                      "name": "compute_instance",
+                      "expression": "`compute_instance`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "compute_instance",
+                    "displayName": "Compute Instance",
+                    "queryName": "per_query_compute_instance_filter_p2"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Compute Instance"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 2,
+            "height": 2
           }
         }
       ],
@@ -1241,7 +1462,7 @@
           },
           "position": {
             "x": 0,
-            "y": 5,
+            "y": 7,
             "width": 2,
             "height": 3
           }
@@ -1281,7 +1502,7 @@
           },
           "position": {
             "x": 2,
-            "y": 5,
+            "y": 7,
             "width": 2,
             "height": 3
           }
@@ -1321,7 +1542,7 @@
           },
           "position": {
             "x": 4,
-            "y": 5,
+            "y": 7,
             "width": 2,
             "height": 3
           }
@@ -1393,7 +1614,7 @@
           },
           "position": {
             "x": 0,
-            "y": 8,
+            "y": 10,
             "width": 6,
             "height": 6
           }
@@ -1458,7 +1679,7 @@
           },
           "position": {
             "x": 0,
-            "y": 14,
+            "y": 16,
             "width": 3,
             "height": 6
           }
@@ -1530,7 +1751,7 @@
           },
           "position": {
             "x": 3,
-            "y": 14,
+            "y": 16,
             "width": 3,
             "height": 6
           }
@@ -1612,9 +1833,52 @@
           },
           "position": {
             "x": 0,
-            "y": 20,
+            "y": 22,
             "width": 6,
             "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "p3_compute_filter",
+            "queries": [
+              {
+                "name": "per_table_compute_instance_filter_p3",
+                "query": {
+                  "datasetName": "per_table",
+                  "fields": [
+                    {
+                      "name": "compute_instance",
+                      "expression": "`compute_instance`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-multi-select",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "compute_instance",
+                    "displayName": "Compute Instance",
+                    "queryName": "per_table_compute_instance_filter_p3"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Compute Instance"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 2,
+            "height": 2
           }
         }
       ],
